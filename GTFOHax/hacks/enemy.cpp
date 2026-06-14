@@ -306,7 +306,13 @@ namespace Enemy
         if (!IsUnityObjectAlive(root) || !app::GameObject_get_activeInHierarchy(root, nullptr))
             return cache.renderers;
 
-        auto renderers = app::GameObject_GetComponentsInChildren_6(root, nullptr);
+        if (!app::GameObject_GetComponentsInChildren_6__MethodInfo ||
+            !*app::GameObject_GetComponentsInChildren_6__MethodInfo)
+            return cache.renderers;
+
+        auto renderers = app::GameObject_GetComponentsInChildren_6(
+            root,
+            *app::GameObject_GetComponentsInChildren_6__MethodInfo);
         if (!renderers)
             return cache.renderers;
 
