@@ -158,6 +158,7 @@ namespace Enemy
     void _RefreshEnemyAgents();
     void RefreshEnemyAgents();
     void UpdateEnemyVisibility();
+    void OnGameStateChanged(app::eGameStateName__Enum nextState);
     void StopRefreshThread();
     void SpawnEnemy(int id, app::AgentMode__Enum agentMode);
 }

@@ -333,6 +333,19 @@ void RenderAgentESPSection(ESP::AgentESPSection& section)
         ImGui::TreePop();
     }
 
+    if (ImGui::TreeNode(I18N::T("esp_model_highlight")))
+    {
+        std::string highlightEnabledLabel = std::string(I18N::T("esp_enabled")) + "##EnemyModelHighlight" + type;
+        std::string highlightColorId = "##EnemyModelHighlightColor" + type;
+        std::string occludedOnlyLabel = std::string(I18N::T("esp_occluded_only")) + "##EnemyModelHighlightOccluded" + type;
+        ImGui::Checkbox(highlightEnabledLabel.c_str(), &section.showModelHighlight);
+        ImGui::SameLine();
+        ImGui::ColorEdit4(highlightColorId.c_str(), (float*)&section.modelHighlightColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+        ImGui::Checkbox(occludedOnlyLabel.c_str(), &section.modelHighlightOccludedOnly);
+        ImGui::TextWrapped("%s", I18N::T("esp_model_highlight_hint"));
+        ImGui::TreePop();
+    }
+
     ImGui::Text(I18N::T("esp_render_distance"));
     ImGui::PushItemWidth(-21);
     std::string renderDistanceId = "##SliderEnemyDistance" + type;

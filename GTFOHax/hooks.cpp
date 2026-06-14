@@ -717,15 +717,15 @@ void Hooks::hkHackingMinigame_TimingGrid_StartGame(app::HackingMinigame_TimingGr
 void Hooks::hkBulletWeaponArchetype_Update(app::BulletWeaponArchetype* __this, MethodInfo* method)
 {
     static auto fpOFunc = reinterpret_cast<void (*)(app::BulletWeaponArchetype*, MethodInfo*)>(hooks["BulletWeaponArchetype_Update"]);
-    fpOFunc(__this, method);
 
-    if (!Player::fullAutoToggleKey.isToggled())
-        return;
-    bool pressed = app::ItemEquippable_get_FireButton(reinterpret_cast<app::ItemEquippable*>(__this->fields.m_weapon), NULL);
-    if (pressed)
-        __this->fields.m_readyToFire = true;
-    else
-        __this->fields.m_readyToFire = false;
+    if (Player::fullAutoToggleKey.isToggled() && app::ArchetypeDataBlock_get_FireMode(__this->fields.m_archetypeData, NULL) == app::eWeaponFireMode__Enum::Semi)
+    {
+        bool pressed = app::ItemEquippable_get_FireButton(reinterpret_cast<app::ItemEquippable*>(__this->fields.m_weapon), NULL);
+        if (pressed)
+            __this->fields.m_readyToFire = true;
+    }
+
+    fpOFunc(__this, method);
 }
 
 void Hooks::hkArtifactPickup_Core_Setup(app::ArtifactPickup_Core* __this, app::ArtifactCategory__Enum category, MethodInfo* method)
@@ -837,6 +837,7 @@ void Hooks::hkGameStateManager_ChangeState(app::eGameStateName__Enum nextState, 
 {
     static auto fpOFunc = reinterpret_cast<void (*)(app::eGameStateName__Enum, MethodInfo*)>(hooks["GameStateManager_ChangeState"]);
     fpOFunc(nextState, method);
+    Enemy::OnGameStateChanged(nextState);
 
     if (nextState < app::eGameStateName__Enum::Generating || nextState > app::eGameStateName__Enum::InLevel)
     {

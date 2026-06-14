@@ -313,6 +313,10 @@ namespace ESP
         int skeletonRenderDistance = 250;
         float skeletonThickness = 1.0f;
 
+        bool showModelHighlight = false;
+        ImVec4 modelHighlightColor = ImVec4(1.0f, 0.15f, 0.05f, 0.35f);
+        bool modelHighlightOccludedOnly = false;
+
         AgentESPSection(std::string type)
         {
             this->type = type;

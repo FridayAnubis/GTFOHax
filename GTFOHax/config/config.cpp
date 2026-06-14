@@ -117,7 +117,10 @@ namespace ESP
             {"ShowSkeleton", value.showSkeleton},
             {"SkeletonColor", value.skeletonColor},
             {"SkeletonRenderDistance", value.skeletonRenderDistance},
-            {"SkeletonThickness", value.skeletonThickness}
+            {"SkeletonThickness", value.skeletonThickness},
+            {"ShowModelHighlight", value.showModelHighlight},
+            {"ModelHighlightColor", value.modelHighlightColor},
+            {"ModelHighlightOccludedOnly", value.modelHighlightOccludedOnly}
         };
     }
 
@@ -146,6 +149,9 @@ namespace ESP
         JSON_GET("SkeletonColor", value.skeletonColor);
         JSON_GET("SkeletonRenderDistance", value.skeletonRenderDistance);
         JSON_GET("SkeletonThickness", value.skeletonThickness);
+        JSON_GET("ShowModelHighlight", value.showModelHighlight);
+        JSON_GET("ModelHighlightColor", value.modelHighlightColor);
+        JSON_GET("ModelHighlightOccludedOnly", value.modelHighlightOccludedOnly);
     }
 
     void to_json(nlohmann::json& j, ESP::AgentESP value)

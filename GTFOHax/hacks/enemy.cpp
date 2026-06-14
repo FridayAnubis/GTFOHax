@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <chrono>
 #include <format>
+#include <limits>
 #include <thread>
 #include <mutex>
 #include <helpers.h>
@@ -60,6 +61,36 @@ namespace Enemy
 
     static std::unordered_map<app::EnemyAgent*, EnemyCacheEntry> linecastCache;
 
+    struct HighlightRenderer
+    {
+        app::Renderer* renderer = nullptr;
+        int subMeshCount = 0;
+    };
+
+    struct HighlightCacheEntry
+    {
+        app::GameObject* root = nullptr;
+        std::vector<HighlightRenderer> renderers;
+    };
+
+    struct HighlightTarget
+    {
+        app::EnemyAgent* enemy = nullptr;
+        app::GameObject* root = nullptr;
+        bool visible = false;
+    };
+
+    struct HighlightMaterialState
+    {
+        ImVec4 color;
+        bool occludedOnly = false;
+        bool valid = false;
+    };
+
+    static std::unordered_map<app::EnemyAgent*, HighlightCacheEntry> g_highlightCache;
+    static std::vector<HighlightTarget> g_highlightTargets;
+    static std::vector<HighlightTarget> g_highlightScratchTargets;
+
     struct GameVisCache
     {
         BoneLineCastCache bones[64];
@@ -106,10 +137,295 @@ namespace Enemy
     static bool     g_maskResolved   = false;
     static uint32_t g_refreshFrame   = 0;
 
+    static app::CommandBuffer* g_highlightBuffer = nullptr;
+    static app::Material* g_visibleHighlightMaterial = nullptr;
+    static app::Material* g_hiddenHighlightMaterial = nullptr;
+    static app::Camera* g_highlightCamera = nullptr;
+    static uint32_t g_highlightBufferHandle = 0;
+    static uint32_t g_visibleHighlightMaterialHandle = 0;
+    static uint32_t g_hiddenHighlightMaterialHandle = 0;
+    static uint32_t g_highlightCameraHandle = 0;
+    static int g_highlightColorId = -1;
+    static int g_highlightSrcBlendId = -1;
+    static int g_highlightDstBlendId = -1;
+    static int g_highlightCullId = -1;
+    static int g_highlightZWriteId = -1;
+    static int g_highlightZTestId = -1;
+    static HighlightMaterialState g_visibleHighlightState;
+    static HighlightMaterialState g_hiddenHighlightState;
+    static int32_t g_highlightReadyFrame = 0;
+    static uint32_t g_highlightCacheFrame = 0;
+
     // Lazy cleanup: only drop a cache entry after we haven't touched it for this many
     // successive refreshes. At the 60 Hz throttle below, 600 ≈ 10 seconds.
     static constexpr uint32_t CACHE_STALE_FRAMES   = 600;
     static constexpr uint32_t CACHE_SWEEP_INTERVAL = 120;
+
+    static app::String* ManagedString(const char* value)
+    {
+        return reinterpret_cast<app::String*>(il2cpp_string_new(value));
+    }
+
+    static bool IsUnityObjectAlive(const void* object)
+    {
+        return object &&
+            app::Object_1_op_Implicit(
+                reinterpret_cast<app::Object_1*>(const_cast<void*>(object)), nullptr);
+    }
+
+    static void ConfigureHighlightMaterialBase(app::Material* material)
+    {
+        app::Material_SetInt_1(material, g_highlightSrcBlendId, 5, nullptr);
+        app::Material_SetInt_1(material, g_highlightDstBlendId, 10, nullptr);
+        app::Material_SetInt_1(material, g_highlightCullId, 2, nullptr);
+        app::Material_SetInt_1(material, g_highlightZWriteId, 0, nullptr);
+        app::Material_set_renderQueue(material, 5000, nullptr);
+    }
+
+    static bool SameColor(const ImVec4& lhs, const ImVec4& rhs)
+    {
+        return lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z && lhs.w == rhs.w;
+    }
+
+    static void UpdateHighlightMaterial(
+        app::Material* material,
+        const ImVec4& color,
+        bool occludedOnly,
+        HighlightMaterialState& state)
+    {
+        if (state.valid && state.occludedOnly == occludedOnly && SameColor(state.color, color))
+            return;
+
+        app::Color nativeColor = { color.x, color.y, color.z, color.w };
+        app::Material_SetColor_1(material, g_highlightColorId, nativeColor, nullptr);
+        app::Material_SetInt_1(material, g_highlightZTestId,
+            static_cast<int>(occludedOnly ? app::CompareFunction__Enum::Greater : app::CompareFunction__Enum::Always), nullptr);
+        state.color = color;
+        state.occludedOnly = occludedOnly;
+        state.valid = true;
+    }
+
+    static void DetachHighlightCamera()
+    {
+        if (IsUnityObjectAlive(g_highlightCamera) && g_highlightBuffer)
+            app::Camera_RemoveCommandBuffer(
+                g_highlightCamera,
+                app::CameraEvent__Enum::BeforeImageEffects,
+                g_highlightBuffer,
+                nullptr);
+        if (g_highlightCameraHandle)
+            il2cpp_gchandle_free(g_highlightCameraHandle);
+
+        g_highlightCamera = nullptr;
+        g_highlightCameraHandle = 0;
+    }
+
+    static bool EnsureHighlightResources()
+    {
+        auto currentCamera = app::Camera_get_main(nullptr);
+        if (!IsUnityObjectAlive(currentCamera))
+            return false;
+        G::mainCamera = currentCamera;
+
+        if (!g_highlightBuffer)
+        {
+            auto shader = app::Shader_Find(ManagedString("Hidden/Internal-Colored"), nullptr);
+            if (!IsUnityObjectAlive(shader) ||
+                !app::CommandBuffer__TypeInfo || !*app::CommandBuffer__TypeInfo ||
+                !app::Material__TypeInfo || !*app::Material__TypeInfo)
+                return false;
+
+            g_highlightBuffer = reinterpret_cast<app::CommandBuffer*>(
+                il2cpp_object_new(reinterpret_cast<Il2CppClass*>(*app::CommandBuffer__TypeInfo)));
+            g_visibleHighlightMaterial = reinterpret_cast<app::Material*>(
+                il2cpp_object_new(reinterpret_cast<Il2CppClass*>(*app::Material__TypeInfo)));
+            g_hiddenHighlightMaterial = reinterpret_cast<app::Material*>(
+                il2cpp_object_new(reinterpret_cast<Il2CppClass*>(*app::Material__TypeInfo)));
+            if (!g_highlightBuffer || !g_visibleHighlightMaterial || !g_hiddenHighlightMaterial)
+                return false;
+
+            app::CommandBuffer__ctor(g_highlightBuffer, nullptr);
+            app::CommandBuffer_set_name(g_highlightBuffer, ManagedString("GTFOHax Enemy Model Highlight"), nullptr);
+            app::Material__ctor(g_visibleHighlightMaterial, shader, nullptr);
+            app::Material__ctor(g_hiddenHighlightMaterial, shader, nullptr);
+
+            g_highlightColorId = app::Shader_PropertyToID(ManagedString("_Color"), nullptr);
+            g_highlightSrcBlendId = app::Shader_PropertyToID(ManagedString("_SrcBlend"), nullptr);
+            g_highlightDstBlendId = app::Shader_PropertyToID(ManagedString("_DstBlend"), nullptr);
+            g_highlightCullId = app::Shader_PropertyToID(ManagedString("_Cull"), nullptr);
+            g_highlightZWriteId = app::Shader_PropertyToID(ManagedString("_ZWrite"), nullptr);
+            g_highlightZTestId = app::Shader_PropertyToID(ManagedString("_ZTest"), nullptr);
+            ConfigureHighlightMaterialBase(g_visibleHighlightMaterial);
+            ConfigureHighlightMaterialBase(g_hiddenHighlightMaterial);
+
+            g_highlightBufferHandle = il2cpp_gchandle_new(reinterpret_cast<Il2CppObject*>(g_highlightBuffer), false);
+            g_visibleHighlightMaterialHandle = il2cpp_gchandle_new(reinterpret_cast<Il2CppObject*>(g_visibleHighlightMaterial), false);
+            g_hiddenHighlightMaterialHandle = il2cpp_gchandle_new(reinterpret_cast<Il2CppObject*>(g_hiddenHighlightMaterial), false);
+        }
+
+        if (g_highlightCamera != currentCamera)
+        {
+            DetachHighlightCamera();
+            g_highlightCamera = currentCamera;
+            g_highlightCameraHandle =
+                il2cpp_gchandle_new(reinterpret_cast<Il2CppObject*>(g_highlightCamera), false);
+            app::Camera_AddCommandBuffer(g_highlightCamera, app::CameraEvent__Enum::BeforeImageEffects, g_highlightBuffer, nullptr);
+        }
+        return true;
+    }
+
+    static void ClearEnemyHighlights()
+    {
+        if (g_highlightBuffer && !g_highlightTargets.empty())
+            app::CommandBuffer_Clear(g_highlightBuffer, nullptr);
+        g_highlightTargets.clear();
+    }
+
+    static const std::vector<HighlightRenderer>& GetHighlightRenderers(
+        app::EnemyAgent* enemy, HighlightCacheEntry& cache)
+    {
+        auto root = enemy->fields.MainModelGO;
+        bool cacheValid = cache.root == root && !cache.renderers.empty();
+        if (cacheValid)
+        {
+            for (const auto& entry : cache.renderers)
+            {
+                if (!IsUnityObjectAlive(entry.renderer))
+                {
+                    cacheValid = false;
+                    break;
+                }
+            }
+        }
+
+        if (cacheValid && (g_highlightCacheFrame % 60) != 0)
+            return cache.renderers;
+
+        cache.root = root;
+        cache.renderers.clear();
+        if (!IsUnityObjectAlive(root) || !app::GameObject_get_activeInHierarchy(root, nullptr))
+            return cache.renderers;
+
+        auto renderers = app::GameObject_GetComponentsInChildren_6(root, nullptr);
+        if (!renderers)
+            return cache.renderers;
+
+        cache.renderers.reserve(renderers->max_length);
+        for (il2cpp_array_size_t i = 0; i < renderers->max_length; ++i)
+        {
+            auto skinnedRenderer = renderers->vector[i];
+            if (!IsUnityObjectAlive(skinnedRenderer))
+                continue;
+
+            auto renderer = reinterpret_cast<app::Renderer*>(skinnedRenderer);
+            auto mesh = app::SkinnedMeshRenderer_get_sharedMesh(skinnedRenderer, nullptr);
+            int subMeshCount = IsUnityObjectAlive(mesh) ? app::Mesh_get_subMeshCount(mesh, nullptr) : 1;
+            cache.renderers.push_back({ renderer, (std::max)(subMeshCount, 1) });
+        }
+        return cache.renderers;
+    }
+
+    static void UpdateEnemyHighlights(const std::shared_ptr<EnemyVec>& snapshot)
+    {
+        if (!ESP::enemyESP.toggleKey.isToggled() || !snapshot)
+        {
+            ClearEnemyHighlights();
+            return;
+        }
+
+        if (app::GameStateManager_get_CurrentStateName(nullptr) != app::eGameStateName__Enum::InLevel ||
+            app::Time_get_frameCount(nullptr) < g_highlightReadyFrame)
+        {
+            ClearEnemyHighlights();
+            return;
+        }
+
+        const bool visibleEnabled = ESP::enemyESP.visibleSec.show && ESP::enemyESP.visibleSec.showModelHighlight;
+        const bool hiddenEnabled = ESP::enemyESP.nonVisibleSec.show && ESP::enemyESP.nonVisibleSec.showModelHighlight;
+        if ((!visibleEnabled && !hiddenEnabled) || !EnsureHighlightResources())
+        {
+            ClearEnemyHighlights();
+            return;
+        }
+
+        UpdateHighlightMaterial(g_visibleHighlightMaterial, ESP::enemyESP.visibleSec.modelHighlightColor,
+            ESP::enemyESP.visibleSec.modelHighlightOccludedOnly, g_visibleHighlightState);
+        UpdateHighlightMaterial(g_hiddenHighlightMaterial, ESP::enemyESP.nonVisibleSec.modelHighlightColor,
+            ESP::enemyESP.nonVisibleSec.modelHighlightOccludedOnly, g_hiddenHighlightState);
+
+        g_highlightScratchTargets.clear();
+        g_highlightScratchTargets.reserve(snapshot->size());
+
+        for (const auto& enemyInfo : *snapshot)
+        {
+            if (!enemyInfo || !IsUnityObjectAlive(enemyInfo->enemyAgent) || !enemyInfo->enemyAgent->fields.m_alive)
+                continue;
+
+            auto& section = enemyInfo->visible ? ESP::enemyESP.visibleSec : ESP::enemyESP.nonVisibleSec;
+            if (!section.show || !section.showModelHighlight || enemyInfo->distance > section.renderDistance)
+                continue;
+
+            auto root = enemyInfo->enemyAgent->fields.MainModelGO;
+            if (IsUnityObjectAlive(root) && app::GameObject_get_activeInHierarchy(root, nullptr))
+                g_highlightScratchTargets.push_back({ enemyInfo->enemyAgent, root, enemyInfo->visible });
+        }
+
+        ClearEnemyHighlights();
+        g_highlightTargets.swap(g_highlightScratchTargets);
+        g_highlightScratchTargets.clear();
+        ++g_highlightCacheFrame;
+
+        for (const auto& target : g_highlightTargets)
+        {
+            if (!IsUnityObjectAlive(target.enemy) || !IsUnityObjectAlive(target.root))
+                continue;
+
+            auto& cache = g_highlightCache[target.enemy];
+            auto material = target.visible ? g_visibleHighlightMaterial : g_hiddenHighlightMaterial;
+            for (const auto& entry : GetHighlightRenderers(target.enemy, cache))
+            {
+                if (!IsUnityObjectAlive(entry.renderer))
+                    continue;
+                for (int subMesh = 0; subMesh < entry.subMeshCount; ++subMesh)
+                    app::CommandBuffer_DrawRenderer(g_highlightBuffer, entry.renderer, material, subMesh, -1, nullptr);
+            }
+        }
+    }
+
+    static void ShutdownEnemyHighlights()
+    {
+        ClearEnemyHighlights();
+        g_highlightCache.clear();
+        g_highlightScratchTargets.clear();
+        DetachHighlightCamera();
+        if (g_highlightBuffer)
+            app::CommandBuffer_Release(g_highlightBuffer, nullptr);
+        if (IsUnityObjectAlive(g_visibleHighlightMaterial))
+            app::Object_1_Destroy_1(reinterpret_cast<app::Object_1*>(g_visibleHighlightMaterial), nullptr);
+        if (IsUnityObjectAlive(g_hiddenHighlightMaterial))
+            app::Object_1_Destroy_1(reinterpret_cast<app::Object_1*>(g_hiddenHighlightMaterial), nullptr);
+
+        if (g_highlightBufferHandle) il2cpp_gchandle_free(g_highlightBufferHandle);
+        if (g_visibleHighlightMaterialHandle) il2cpp_gchandle_free(g_visibleHighlightMaterialHandle);
+        if (g_hiddenHighlightMaterialHandle) il2cpp_gchandle_free(g_hiddenHighlightMaterialHandle);
+
+        g_highlightBuffer = nullptr;
+        g_visibleHighlightMaterial = nullptr;
+        g_hiddenHighlightMaterial = nullptr;
+        g_highlightBufferHandle = 0;
+        g_visibleHighlightMaterialHandle = 0;
+        g_hiddenHighlightMaterialHandle = 0;
+        g_highlightColorId = -1;
+        g_highlightSrcBlendId = -1;
+        g_highlightDstBlendId = -1;
+        g_highlightCullId = -1;
+        g_highlightZWriteId = -1;
+        g_highlightZTestId = -1;
+        g_visibleHighlightState = {};
+        g_hiddenHighlightState = {};
+        g_highlightReadyFrame = 0;
+        g_highlightCacheFrame = 0;
+    }
 
 
     app::Vector3 GetEnemyMovementDirection(app::EnemyAgent* enemy)
@@ -393,16 +709,24 @@ namespace Enemy
 
     void UpdateEnemyVisibility()
     {
+        if (!ESP::enemyESP.toggleKey.isToggled())
+            ClearEnemyHighlights();
         if (!ESP::enemyESP.toggleKey.isToggled() && !Aimbot::settings.toggleKey.isToggled())
             return;
         if (G::localPlayer == nullptr)
+        {
+            ClearEnemyHighlights();
             return;
+        }
 
         const bool needVisibilityCheck =
             ESP::enemyESP.visibleSec.show || ESP::enemyESP.nonVisibleSec.show ||
             (Aimbot::settings.toggleKey.isToggled() && Aimbot::settings.visibleOnly);
         if (!needVisibilityCheck)
+        {
+            ClearEnemyHighlights();
             return;
+        }
 
         static bool reservedOnce = false;
         if (!reservedOnce)
@@ -414,7 +738,11 @@ namespace Enemy
         app::Vector3 eyePos = G::localPlayer->fields.m_eyePosition;
 
         auto snapshot = enemies.load();
-        if (!snapshot) return;
+        if (!snapshot)
+        {
+            ClearEnemyHighlights();
+            return;
+        }
 
         for (auto& enemyInfo : *snapshot)
         {
@@ -449,7 +777,23 @@ namespace Enemy
             enemyInfo->visible = anyVisible;
         }
 
+        UpdateEnemyHighlights(snapshot);
         enemiesReady.store(snapshot);
+    }
+
+    void OnGameStateChanged(app::eGameStateName__Enum nextState)
+    {
+        ClearEnemyHighlights();
+        g_highlightCache.clear();
+        g_highlightScratchTargets.clear();
+        g_highlightCacheFrame = 0;
+
+        DetachHighlightCamera();
+        G::mainCamera = nullptr;
+        g_highlightReadyFrame =
+            nextState == app::eGameStateName__Enum::InLevel
+                ? app::Time_get_frameCount(nullptr) + 30
+                : (std::numeric_limits<int32_t>::max)();
     }
 
     void RefreshEnemyAgents()
@@ -472,6 +816,7 @@ namespace Enemy
         g_refreshRunning.store(false, std::memory_order_relaxed);
         if (g_refreshThread.joinable())
             g_refreshThread.join();
+        ShutdownEnemyHighlights();
     }
 
     void SpawnEnemy(int id, app::AgentMode__Enum agentMode)
